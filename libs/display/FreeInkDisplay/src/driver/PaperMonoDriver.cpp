@@ -34,6 +34,13 @@ constexpr uint8_t CTRL_POWER_OFF = 0x03;
 // reload but without the trailing analog/clock power-down. Repeated UI updates
 // can then reuse the resident OTP LUT through 0x0C.
 constexpr uint8_t CTRL_OTP_BW_HOLD = 0xFC;
+// The OTP's Display Mode 1 waveform (the same stages as 0xFC with the mode bit
+// 0x08 clear; SSD1677 datasheet, register 0x22): the vendor's flashing, DC-
+// balanced full update. Mode 2 above leaves pigment short of saturation and a
+// small residual charge, which is harmless for a page that is soon redrawn
+// but drifts visibly on an image left unpowered for hours. Used only for
+// long-hold paints (requestLongHoldRefresh()).
+constexpr uint8_t CTRL_OTP_FULL_HOLD = 0xF4;
 
 // Source driving voltage selectors inside a LUT phase, two bits per sub-phase.
 constexpr uint8_t VS_BLACK = 0x01;  // VSH1, +15 V
@@ -613,8 +620,22 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
   bus.data(0x80);  // VCOM border; do not let the custom LUT drive a dark rim.
   writePlane(bus, CMD_WRITE_NEW, bwTarget);
   writePlane(bus, CMD_WRITE_OLD, _sel26);
-  activateOtp(bus);
-  runBootCleanPass(bus, bwTarget, _sel26);
+  // Only a corrective paint consumes the request: a quick paint in between
+  // (a "please wait" frame, say) leaves it for the long-hold image itself.
+  const bool longHold = _longHoldNext && forceAll;
+  if (forceAll) _longHoldNext = false;
+  if (longHold) {
+    // Every pixel is presented as changed (forceAll), so the mode 1 waveform
+    // drives the whole glass through its flash to the target. The resident LUT
+    // is then mode 1's: mark it unknown so the next paint reloads mode 2.
+    activate(bus, CTRL_OTP_FULL_HOLD);
+    _controllerPowered = true;
+    _lutState = LutState::Unknown;
+    _bootCleanPaints = 0;
+  } else {
+    activateOtp(bus);
+    runBootCleanPass(bus, bwTarget, _sel26);
+  }
 
   for (uint32_t i = 0; i < BUFFER_SIZE; ++i) {
     const uint8_t black = static_cast<uint8_t>(~bwTarget[i]);
@@ -624,10 +645,12 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
   _panelHasGray = false;
 
 #ifdef ENABLE_SERIAL_LOG
-  Serial.printf("[%lu] SSD1677 OTP B/W: changed=%lu forced=%u elapsed=%lums\n", millis(),
-                static_cast<unsigned long>(changed), static_cast<unsigned>(forceAll), millis() - started);
+  Serial.printf("[%lu] SSD1677 OTP B/W: changed=%lu forced=%u mode=%u elapsed=%lums\n", millis(),
+                static_cast<unsigned long>(changed), static_cast<unsigned>(forceAll), longHold ? 1u : 2u,
+                millis() - started);
 #else
   (void)started;
+  (void)longHold;
 #endif
   return true;
 }
@@ -1135,6 +1158,7 @@ void PaperMonoDriver::deepSleep(EpdBus& bus) {
   _needsFull = true;
   _lastBwValid = false;
   _windowBaselineValid = false;
+  _longHoldNext = false;
   resetGray();
 }
 

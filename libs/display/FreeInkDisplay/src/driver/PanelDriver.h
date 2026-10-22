@@ -201,6 +201,11 @@ class PanelDriver {
   // non-flashing. Drivers may use this to widen their drive set (re-blacken
   // the unchanged background each update) or bias their deghost direction.
   virtual void setBackgroundHint(bool darkBackground) { (void)darkBackground; }
+  // The next full (corrective) B/W refresh paints an image that will stay on
+  // the glass unpowered for a long time (sleep or power-off screen). Drivers
+  // whose ordinary corrective refresh is non-flashing may use the panel's
+  // balanced flashing waveform for it instead. One-shot; no-op by default.
+  virtual void requestLongHoldRefresh() {}
   // Capture the cancellation generation at the start of a logical UI render.
   // This must happen before CPU-side composition: input arriving while an old
   // frame is being composed must still cancel its optional post-refresh work.

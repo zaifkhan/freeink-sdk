@@ -973,6 +973,10 @@ void FreeInkDisplay::requestResync(uint8_t settlePasses) {
   if (_driver) _driver->requestResync(settlePasses);
 }
 
+void FreeInkDisplay::requestLongHoldRefresh() {
+  if (_driver) _driver->requestLongHoldRefresh();
+}
+
 void FreeInkDisplay::skipInitialResync() {
   if (_driver) _driver->skipInitialResync();
 }

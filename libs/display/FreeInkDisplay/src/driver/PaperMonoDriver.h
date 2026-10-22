@@ -84,6 +84,9 @@ class PaperMonoDriver final : public PanelDriver {
   // Inverted (dark-background) content: runOtpUpdate() widens its drive set to
   // re-blacken the unchanged background every update. See the comment there.
   void setBackgroundHint(bool darkBackground) override { _darkBackground = darkBackground; }
+  // The next corrective B/W paint uses the OTP's flashing Display Mode 1
+  // waveform instead of the non-flashing Mode 2 one. See runOtpUpdate().
+  void requestLongHoldRefresh() override { _longHoldNext = true; }
 
   void setGrayParams(const PaperMonoGrayParams& params);
   void abortGray() { abortPostRefresh(); }
@@ -135,6 +138,7 @@ class PaperMonoDriver final : public PanelDriver {
   bool _initialized = false;
   bool _needsFull = true;
   bool _darkBackground = false;
+  bool _longHoldNext = false;
   // Paints remaining that double-drive to erase dwelled pre-boot residue.
   uint8_t _bootCleanPaints = 0;
   bool _lastBwValid = false;

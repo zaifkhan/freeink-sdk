@@ -273,6 +273,9 @@ class FreeInkDisplay {
   // Hint the X3 policy to run a one-shot full resync on next update.
   void requestResync(uint8_t settlePasses = 0);
   void skipInitialResync();
+  // The next full refresh is a long-hold image (sleep/power-off screen); see
+  // PanelDriver::requestLongHoldRefresh().
+  void requestLongHoldRefresh();
   void beginDisplayWork();
   void abortPostRefresh();
   bool postRefreshAborted() const;
