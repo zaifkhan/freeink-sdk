@@ -618,16 +618,19 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
   const unsigned long started = millis();
   bus.cmd(0x3C);
   bus.data(0x80);  // VCOM border; do not let the custom LUT drive a dark rim.
-  writePlane(bus, CMD_WRITE_NEW, bwTarget);
-  writePlane(bus, CMD_WRITE_OLD, _sel26);
   // Only a corrective paint consumes the request: a quick paint in between
   // (a "please wait" frame, say) leaves it for the long-hold image itself.
   const bool longHold = _longHoldNext && forceAll;
   if (forceAll) _longHoldNext = false;
+  writePlane(bus, CMD_WRITE_NEW, bwTarget);
+  // Mode 1 is a full update that drives every pixel from any state: like the
+  // vendor's full-refresh sequences it gets the target in both planes. (The
+  // inverted OLD plane that makes mode 2 drive every pixel came out as an
+  // inverted image on glass some of the time.)
+  writePlane(bus, CMD_WRITE_OLD, longHold ? bwTarget : _sel26);
   if (longHold) {
-    // Every pixel is presented as changed (forceAll), so the mode 1 waveform
-    // drives the whole glass through its flash to the target. The resident LUT
-    // is then mode 1's: mark it unknown so the next paint reloads mode 2.
+    // The resident LUT is then mode 1's: mark it unknown so the next paint
+    // reloads mode 2.
     activate(bus, CTRL_OTP_FULL_HOLD);
     _controllerPowered = true;
     _lutState = LutState::Unknown;
