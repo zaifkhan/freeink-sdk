@@ -26,6 +26,12 @@ bool Buzzer::begin() {
 void Buzzer::tone(uint32_t freqHz, uint32_t durationMs) {
   if (!begun_ || freqHz == 0) return;
   ledcWriteTone(buzzerPin(), freqHz);
+  if (volume_ < 100) {
+    // ledcWriteTone leaves a 50 % duty; narrow it for a quieter tone.
+    constexpr uint32_t HALF_DUTY = 1u << (LEDC_RESOLUTION_BITS - 1);
+    const uint32_t duty = HALF_DUTY * volume_ / 100;
+    ledcWrite(buzzerPin(), duty == 0 ? 1 : duty);
+  }
   if (durationMs > 0) {
     delay(durationMs);
     noTone();

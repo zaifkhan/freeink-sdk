@@ -35,11 +35,18 @@ class Buzzer {
   // Silences a continuous tone.
   void noTone();
 
+  // Loudness of later tones, 1-100 % of the full 50 % duty square wave. A
+  // passive buzzer is loudest at 50 % duty; a narrower pulse at the same pitch
+  // drives it with less energy, so it sounds quieter (not linearly).
+  void setVolume(uint8_t percent) { volume_ = percent == 0 ? 1 : (percent > 100 ? 100 : percent); }
+  uint8_t volume() const { return volume_; }
+
   // Releases the LEDC channel / pin. begin() re-attaches.
   void end();
 
  private:
   bool begun_ = false;
+  uint8_t volume_ = 100;
 };
 
 }  // namespace freeink
