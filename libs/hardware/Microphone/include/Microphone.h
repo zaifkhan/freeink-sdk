@@ -37,14 +37,21 @@ class Microphone {
   bool present() const { return begun_; }
 
   // Read up to maxSamples 16-bit mono samples into dst. Blocks up to timeoutMs
-  // for data. Metalio returns at most 32 samples per call; pump read() for
-  // larger recordings. Returns samples read (0 = timeout/no data, <0 = error/not begun).
+  // for data and returns what arrived by then, which may be fewer samples (a
+  // timeout keeps the partial block). Metalio returns at most 32 samples per
+  // call; pump read() for larger recordings. Returns samples read (0 = no data
+  // in time, <0 = error/not begun).
   int read(int16_t* dst, size_t maxSamples, uint32_t timeoutMs = 100);
 
   // Stops the RX channel and powers the mic rail down. begin() restarts it.
   void end();
 
   uint32_t sampleRate() const { return sampleRate_; }
+
+  // PDM: samples the driver dropped since begin() because read() was not
+  // called often enough (its DMA buffers, about 0.25 s, filled up). 0 when
+  // nothing was lost.
+  uint32_t droppedSamples() const;
 
  private:
   bool begun_ = false;

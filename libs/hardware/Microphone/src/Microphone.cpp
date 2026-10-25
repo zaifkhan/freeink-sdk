@@ -15,6 +15,20 @@
 namespace freeink {
 
 namespace {
+// DMA buffering for PDM capture: 8 x 512 frames = 4096 samples, about 0.25 s
+// at 16 kHz. The IDF default (6 x 240, 90 ms) loses sound whenever the caller
+// is held up by a display refresh or a slow SD card write.
+constexpr uint32_t kDmaDescNum = 8;
+constexpr uint32_t kDmaFrameNum = 512;
+
+// Counted in the I2S interrupt when a full DMA buffer had to be overwritten.
+volatile uint32_t gDroppedSamples = 0;
+
+bool IRAM_ATTR onRxOverflow(i2s_chan_handle_t, i2s_event_data_t* event, void*) {
+  gDroppedSamples = gDroppedSamples + static_cast<uint32_t>(event->size / sizeof(int16_t));
+  return false;
+}
+
 // Assert/deassert the mic power-enable rail per the board profile's polarity.
 void setMicPower(const BoardConfig::MicConfig& mic, bool on) {
   if (mic.enable == BoardConfig::PIN_UNASSIGNED) return;
@@ -50,6 +64,8 @@ bool Microphone::begin(uint32_t sampleRate) {
 
   i2s_chan_handle_t rx = nullptr;
   i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
+  chanCfg.dma_desc_num = kDmaDescNum;
+  chanCfg.dma_frame_num = kDmaFrameNum;
   if (i2s_new_channel(&chanCfg, nullptr, &rx) != ESP_OK) {
     setMicPower(mic, false);
     return false;
@@ -65,7 +81,11 @@ bool Microphone::begin(uint32_t sampleRate) {
               .invert_flags = {.clk_inv = false},
           },
   };
-  if (i2s_channel_init_pdm_rx_mode(rx, &pdmCfg) != ESP_OK || i2s_channel_enable(rx) != ESP_OK) {
+  gDroppedSamples = 0;
+  i2s_event_callbacks_t callbacks = {};
+  callbacks.on_recv_q_ovf = onRxOverflow;
+  if (i2s_channel_init_pdm_rx_mode(rx, &pdmCfg) != ESP_OK ||
+      i2s_channel_register_event_callback(rx, &callbacks, nullptr) != ESP_OK || i2s_channel_enable(rx) != ESP_OK) {
     i2s_del_channel(rx);
     setMicPower(mic, false);
     return false;
@@ -94,12 +114,16 @@ int Microphone::read(int16_t* dst, size_t maxSamples, uint32_t timeoutMs) {
   }
 #endif
   size_t bytesRead = 0;
+  // i2s_channel_read() takes milliseconds. On a timeout it still reports the
+  // bytes it copied before giving up: keep them (dropping them lost a piece of
+  // every block that did not fill in time, heard as crackling).
   const esp_err_t err = i2s_channel_read(static_cast<i2s_chan_handle_t>(rxChan_), dst,
-                                         maxSamples * sizeof(int16_t), &bytesRead, pdMS_TO_TICKS(timeoutMs));
-  if (err == ESP_ERR_TIMEOUT) return 0;
-  if (err != ESP_OK) return -1;
+                                         maxSamples * sizeof(int16_t), &bytesRead, timeoutMs);
+  if (err != ESP_OK && err != ESP_ERR_TIMEOUT) return -1;
   return static_cast<int>(bytesRead / sizeof(int16_t));
 }
+
+uint32_t Microphone::droppedSamples() const { return gDroppedSamples; }
 
 void Microphone::end() {
 #if FREEINK_DEVICE_METALIO_EINK4
@@ -129,6 +153,7 @@ namespace freeink {
 bool Microphone::begin(uint32_t) { return false; }
 int Microphone::read(int16_t*, size_t, uint32_t) { return -1; }
 void Microphone::end() {}
+uint32_t Microphone::droppedSamples() const { return 0; }
 }  // namespace freeink
 
 #endif  // FREEINK_CAP_MIC
