@@ -185,6 +185,7 @@ bool PaperMonoDriver::allocateBuffers() {
   if (glassWasMissing && ok) {
     memset(_glassNonWhite, 0, BUFFER_SIZE);
     memset(_glassBlack, 0, BUFFER_SIZE);
+    _glassKnown = false;
   }
   return ok;
 }
@@ -582,12 +583,21 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
   // the safe direction for a dark background (residue there is always light);
   // the user's corrective cadence rebalances, as with the entry-0 top-up.
   const uint8_t darkDrive = _darkBackground ? 0xFFu : 0x00u;
+  // Only a corrective paint consumes the request: a quick paint in between
+  // (a "please wait" frame, say) leaves it for the long-hold image itself.
+  const bool longHold = _longHoldNext && forceAll;
+  // A long-hold paint whose OLD plane is what is really on the glass: pixels
+  // that change get mode 1's full transition drive. With the target in both
+  // planes every pixel counted as unchanged and got only the hold drive, which
+  // left the previous screen faintly visible under the sleep and power-off
+  // images. Only when the glass model is known (any full paint this boot).
+  const bool longHoldFromGlass = longHold && _glassKnown;
 #ifdef ENABLE_SERIAL_LOG
   uint32_t changed = 0;
 #endif
   for (uint32_t i = 0; i < BUFFER_SIZE; ++i) {
     const uint8_t bw = bwTarget[i];  // set bit = white
-    if (forceAll) {
+    if (forceAll && !longHoldFromGlass) {
       _sel26[i] = static_cast<uint8_t>(~bw);
       changedBits = 0xFF;
 #ifdef ENABLE_SERIAL_LOG
@@ -611,6 +621,13 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
     // choose the opposite of the target so the controller cannot classify it
     // as an unchanged endpoint.
     const uint8_t oldWhite = static_cast<uint8_t>(~oldNonWhite);
+    if (longHoldFromGlass) {
+      // The glass as it is, grays as the opposite of their target. No dark
+      // background trick: mode 1 drives unchanged pixels as well.
+      _sel26[i] = static_cast<uint8_t>(oldWhite | (targetBlack & oldGray));
+      changedBits = 0xFF;  // a long-hold paint always runs
+      continue;
+    }
     _sel26[i] = static_cast<uint8_t>(oldWhite | (targetBlack & oldGray) | (targetBlack & darkDrive));
   }
   if (changedBits == 0) return false;
@@ -618,16 +635,14 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
   const unsigned long started = millis();
   bus.cmd(0x3C);
   bus.data(0x80);  // VCOM border; do not let the custom LUT drive a dark rim.
-  // Only a corrective paint consumes the request: a quick paint in between
-  // (a "please wait" frame, say) leaves it for the long-hold image itself.
-  const bool longHold = _longHoldNext && forceAll;
   if (forceAll) _longHoldNext = false;
   writePlane(bus, CMD_WRITE_NEW, bwTarget);
-  // Mode 1 is a full update that drives every pixel from any state: like the
-  // vendor's full-refresh sequences it gets the target in both planes. (The
-  // inverted OLD plane that makes mode 2 drive every pixel came out as an
-  // inverted image on glass some of the time.)
-  writePlane(bus, CMD_WRITE_OLD, longHold ? bwTarget : _sel26);
+  // Mode 1 is a full update that drives every pixel from any state. Its OLD
+  // plane is the glass as it is (above); with the glass unknown (first paint
+  // after a start) it gets the target, like the vendor's full-refresh
+  // sequences. (The inverted OLD plane that makes mode 2 drive every pixel
+  // came out as an inverted image on glass some of the time.)
+  writePlane(bus, CMD_WRITE_OLD, longHold && !longHoldFromGlass ? bwTarget : _sel26);
   if (longHold) {
     // The resident LUT is then mode 1's: mark it unknown so the next paint
     // reloads mode 2.
@@ -646,11 +661,12 @@ bool PaperMonoDriver::runOtpUpdate(EpdBus& bus, const uint8_t* bwTarget, bool fo
     _glassBlack[i] = black;
   }
   _panelHasGray = false;
+  _glassKnown = true;
 
 #ifdef ENABLE_SERIAL_LOG
-  Serial.printf("[%lu] SSD1677 OTP B/W: changed=%lu forced=%u mode=%u elapsed=%lums\n", millis(),
+  Serial.printf("[%lu] SSD1677 OTP B/W: changed=%lu forced=%u mode=%u old=%s elapsed=%lums\n", millis(),
                 static_cast<unsigned long>(changed), static_cast<unsigned>(forceAll), longHold ? 1u : 2u,
-                millis() - started);
+                longHoldFromGlass ? "glass" : (longHold ? "target" : "diff"), millis() - started);
 #else
   (void)started;
   (void)longHold;
@@ -753,6 +769,7 @@ bool PaperMonoDriver::runUpdate(EpdBus& bus, const uint8_t* bwTarget, bool useGr
     _glassBlack[i] = static_cast<uint8_t>(~bw & ~gray);
   }
   _panelHasGray = useGray && (_grayLsbReady || _grayMsbReady);
+  _glassKnown = true;
 
 #ifdef ENABLE_SERIAL_LOG
   Serial.printf("[%lu] SSD1677 update: stages=%u frames=%u+%u changed=%lu drive=%lu clean=%lu gray=%u full=%u "
