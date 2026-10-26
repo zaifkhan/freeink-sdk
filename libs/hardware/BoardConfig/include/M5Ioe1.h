@@ -87,7 +87,13 @@ inline bool begin() {
   if (g_addr != 0 && g_addr != 0xFF) return true;
   if (g_addr == 0xFF) return false;
   m5pm1::beginBus();
+  // The Paper Mono's expander answers at 0x4F (schematic V0.6.2): asking
+  // there first spares an I2C error on every start-up.
+#if defined(FREEINK_DEVICE_PAPERMONO) && FREEINK_DEVICE_PAPERMONO
+  for (uint8_t addr : {ADDR_ALT, ADDR_PRIMARY}) {
+#else
   for (uint8_t addr : {ADDR_PRIMARY, ADDR_ALT}) {
+#endif
     uint8_t uid[2] = {0, 0};
     if (readBytesAt(addr, REG_UID_L, uid, sizeof(uid))) {
       g_addr = addr;
