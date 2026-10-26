@@ -170,9 +170,6 @@ class PaperMonoDriver final : public PanelDriver {
   uint8_t* _grayMsb = nullptr;   // staged light selector
   uint8_t* _glassNonWhite = nullptr;  // on-glass q24: pixel is not white
   uint8_t* _glassBlack = nullptr;     // on-glass q26: pixel is black
-  // _glass* hold what is really on the panel: set by any full-panel paint this
-  // boot. Until then they read all white, which is a guess.
-  bool _glassKnown = false;
   uint8_t* _sel24 = nullptr;     // LUT selector plane written to RAM 0x24
   uint8_t* _sel26 = nullptr;     // LUT selector plane written to RAM 0x26
   static constexpr uint16_t GRAY_ROWS = 480;
