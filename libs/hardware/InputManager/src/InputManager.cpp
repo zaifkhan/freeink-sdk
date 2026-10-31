@@ -635,7 +635,8 @@ InputManager::TouchPoint InputManager::getTouchPoint() const { return touchPoint
 
 bool InputManager::supportsMultiTouch() const {
 #if FREEINK_CAP_TOUCH
-  return touchDataEnabled && BoardConfig::ACTIVE.touch.controller == BoardConfig::TouchController::Gt911;
+  return touchDataEnabled && (BoardConfig::ACTIVE.touch.controller == BoardConfig::TouchController::Gt911 ||
+                              BoardConfig::ACTIVE.touch.controller == BoardConfig::TouchController::Ft5x06);
 #else
   return false;
 #endif
@@ -1623,9 +1624,10 @@ void InputManager::pollFt5x06(const unsigned long now) {
     return;
   }
 
-  // Register 0x02 is TD_STATUS followed by the first point's XH/XL/YH/YL.
-  // One contact is enough for the app's tap/swipe/drag gesture model.
-  uint8_t data[5] = {};
+  // Register 0x02 is TD_STATUS, then two 6-byte point records (XH, XL, YH, YL,
+  // WEIGHT, MISC). The event flag is XH bits 7-6 and the touch ID is YH bits
+  // 7-4. Two contacts are all the app's gesture model uses (pinch/scroll).
+  uint8_t data[13] = {};
   if (!ft5x06ReadReg(0x02, data, sizeof(data))) {
     // Transient read failures happen on the shared PY32 bus; survive them.
     // But a controller that has stopped answering (rail glitch) must not
@@ -1639,10 +1641,15 @@ void InputManager::pollFt5x06(const unsigned long now) {
     }
     return;
   }
-  if ((data[0] & 0x0F) == 0) {
+  const uint8_t reported = data[0] & 0x0F;
+  if (reported == 0) {
     // FT6336 may keep INT low until TD_STATUS has been drained. Treat the
     // controller's zero-contact frame as authoritative; waiting only for the
     // GPIO to rise leaves touchPressed latched and drops every later tap.
+    touchSnapshot.count = 0;
+    touchSnapshot.reportedCount = 0;
+    touchSnapshot.idsStable = true;
+    updateMultiTouchGesture(touchSnapshot, now);
     if (touchPressed) {
       touchPressed = false;
       touchPoint.valid = false;
@@ -1654,21 +1661,30 @@ void InputManager::pollFt5x06(const unsigned long now) {
     }
     return;
   }
-  const uint16_t rawX = static_cast<uint16_t>((data[1] & 0x0F) << 8) | data[2];
-  const uint16_t rawY = static_cast<uint16_t>((data[3] & 0x0F) << 8) | data[4];
-  const uint16_t sx = t.swapXY ? rawY : rawX;
-  const uint16_t sy = t.swapXY ? rawX : rawY;
 
-  touchPoint.valid = true;
-  touchPoint.x = mapTouchAxis(sx, t.rawMinX, t.rawMaxX, t.rawMaxX - t.rawMinX);
-  touchPoint.y = mapTouchAxis(sy, t.rawMinY, t.rawMaxY, t.rawMaxY - t.rawMinY);
-  if (t.flipX) {
-    touchPoint.x = static_cast<uint16_t>((t.rawMaxX - t.rawMinX) - touchPoint.x);
+  const uint8_t stored = std::min<uint8_t>(std::min<uint8_t>(reported, MAX_TOUCH_CONTACTS), 2);
+  touchSnapshot.reportedCount = reported;
+  touchSnapshot.idsStable = true;
+  touchSnapshot.count = stored;
+  for (uint8_t i = 0; i < stored; ++i) {
+    const uint8_t* rec = data + 1 + i * 6;
+    const uint16_t rawX = static_cast<uint16_t>((rec[0] & 0x0F) << 8) | rec[1];
+    const uint16_t rawY = static_cast<uint16_t>((rec[2] & 0x0F) << 8) | rec[3];
+    const uint16_t sx = t.swapXY ? rawY : rawX;
+    const uint16_t sy = t.swapXY ? rawX : rawY;
+    TouchPoint& point = touchSnapshot.points[i].point;
+    touchSnapshot.points[i].id = rec[2] >> 4;
+    point.valid = true;
+    point.x = mapTouchAxis(sx, t.rawMinX, t.rawMaxX, t.rawMaxX - t.rawMinX);
+    point.y = mapTouchAxis(sy, t.rawMinY, t.rawMaxY, t.rawMaxY - t.rawMinY);
+    if (t.flipX) point.x = static_cast<uint16_t>((t.rawMaxX - t.rawMinX) - point.x);
+    if (t.flipY) point.y = static_cast<uint16_t>((t.rawMaxY - t.rawMinY) - point.y);
+    point.timestamp = now;
   }
-  if (t.flipY) {
-    touchPoint.y = static_cast<uint16_t>((t.rawMaxY - t.rawMinY) - touchPoint.y);
-  }
-  touchPoint.timestamp = now;
+  updateMultiTouchGesture(touchSnapshot, now);
+
+  // Single-touch API stays driven by the first record.
+  touchPoint = touchSnapshot.points[0].point;
 
   if (!touchPressed) {
     touchPressed = true;
@@ -1678,7 +1694,7 @@ void InputManager::pollFt5x06(const unsigned long now) {
     touchMovedBeyondTapSlop = false;
     touchMovedBeyondTapReleaseSlop = false;
 #ifdef TOUCH_PROBE_DEBUG
-    touchDebugPrintf("[touch] FT press raw=(%u,%u) panel=(%u,%u)\n", rawX, rawY, touchPoint.x, touchPoint.y);
+    touchDebugPrintf("[touch] FT press contacts=%u panel=(%u,%u)\n", touchSnapshot.reportedCount, touchPoint.x, touchPoint.y);
 #endif
   } else {
     touchUpPoint = touchPoint;
@@ -1690,6 +1706,11 @@ void InputManager::pollFt5x06(const unsigned long now) {
     if (absInt(dx) > TOUCH_TAP_RELEASE_SLOP_PX || absInt(dy) > TOUCH_TAP_RELEASE_SLOP_PX) {
       touchMovedBeyondTapReleaseSlop = true;
     }
+  }
+  // A multi-contact gesture must not become a primary-contact tap.
+  if (reported > 1) {
+    touchMovedBeyondTapSlop = true;
+    touchMovedBeyondTapReleaseSlop = true;
   }
 }
 
