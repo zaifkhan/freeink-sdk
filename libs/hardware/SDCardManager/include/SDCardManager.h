@@ -96,6 +96,10 @@ class SDCardManager {
   // owner releases the card. Returns null when nothing is mounted.
   FsBlockDeviceInterface* detachFilesystemForRawAccess();
 #if FREEINK_SD_SDMMC
+  // Let one SDMMC command move up to `sectors` sectors (default 8) by growing the
+  // internal DMA bounce buffer; used by USB Drive for 16 KB bursts. False (and the
+  // old size is kept) if the allocation fails. The next begin() resets it.
+  bool setRawTransferSectors(size_t sectors);
   // Stop the card for deep sleep: unmount the volume, stop the SDMMC host, and
   // float the bus pads so their pull-ups stop back-feeding the card's VDD net
   // through sleep. Idempotent; call only after all file users have stopped. A

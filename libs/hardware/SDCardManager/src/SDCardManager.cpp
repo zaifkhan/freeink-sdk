@@ -55,7 +55,19 @@ bool SDCardManager::begin() {
     cachedUsedBytesValid = false;
     return false;
   }
-  if (!_vol.begin(_dev)) {
+  bool volumeOk = _vol.begin(_dev);
+#if FREEINK_DEVICE_PAPERMONO
+  if (!volumeOk) {
+    // The card initialised at the 40 MHz high-speed clock but the filesystem would
+    // not mount: remount the whole device at the 20 MHz default before giving up.
+    if (Serial) Serial.printf("[%lu] [SD] SDMMC volume mount failed, retrying at 20 MHz\n", millis());
+    _dev->setMaxFreqKhz(20000);
+    _dev->end();
+    volumeOk = _dev->begin(BoardConfig::ACTIVE.sdmmc) && _vol.begin(_dev);
+    _dev->setMaxFreqKhz(0);  // next begin() (e.g. after USB Drive) tries high speed again
+  }
+#endif
+  if (!volumeOk) {
     if (Serial) Serial.printf("[%lu] [SD] SDMMC volume mount failed\n", millis());
     initialized = false;
     cachedTotalBytes = 0;
@@ -70,6 +82,8 @@ bool SDCardManager::begin() {
 }
 
 FsBlockDeviceInterface* SDCardManager::rawBlockDevice() { return _dev; }
+
+bool SDCardManager::setRawTransferSectors(size_t sectors) { return _dev && _dev->setMaxTransferSectors(sectors); }
 
 FsBlockDeviceInterface* SDCardManager::detachFilesystemForRawAccess() {
   if (!initialized || !_dev) return nullptr;

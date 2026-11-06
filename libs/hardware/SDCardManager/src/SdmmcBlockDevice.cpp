@@ -42,10 +42,17 @@ bool SdmmcBlockDevice::begin(const BoardConfig::SdmmcPins& pins) {
 
   // Host config matches the OEM (recovered from app1's mountSD via Ghidra): full
   // default capability flags (0x37) with the actual width selected via slot.width
-  // only, and the data clock at 40 MHz. The read timeouts we chased earlier were a
-  // mount-sequencing problem, not a clock-margin one — see the retry loop below.
+  // only. SDMMC_FREQ_DEFAULT is 20 MHz (SDMMC_FREQ_HIGHSPEED is the 40 MHz mode); the
+  // read timeouts we chased earlier were a mount-sequencing problem, not a
+  // clock-margin one — see the retry loop below. PaperMono asks for 40 MHz first
+  // and falls back to 20 MHz inside that loop.
   sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-  host.max_freq_khz = SDMMC_FREQ_DEFAULT;  // 40 MHz
+  host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+  int fastKhz = _maxFreqKhz;
+#if FREEINK_DEVICE_PAPERMONO
+  if (fastKhz == 0) fastKhz = SDMMC_FREQ_HIGHSPEED;
+#endif
+  _maxTransferSectors = kDefaultTransferSectors;
 
   // Slot pin map. The ESP32-S3 routes SDMMC through the GPIO matrix, so the data
   // and clock/command lines are assignable (unlike the classic ESP32's fixed slot).
@@ -91,7 +98,7 @@ bool SdmmcBlockDevice::begin(const BoardConfig::SdmmcPins& pins) {
   // live in PSRAM / at an unaligned address, while native SDMMC requires an
   // internal-RAM DMA buffer. Limiting each transfer to eight sectors keeps the
   // buffer bounded at 4 KiB and avoids heap churn in the USB-MSC callbacks.
-  _dmaBuffer = static_cast<uint8_t*>(heap_caps_malloc(kSectorSize * kMaxTransferSectors,
+  _dmaBuffer = static_cast<uint8_t*>(heap_caps_malloc(kSectorSize * _maxTransferSectors,
                                                       MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
   if (!_dmaBuffer) {
     free(card);
@@ -105,8 +112,12 @@ bool SdmmcBlockDevice::begin(const BoardConfig::SdmmcPins& pins) {
   // first (un-retried) block read to hit a still-marginal data path and fail with
   // 0x107; validating a real read here means _card is only published once genuine
   // block I/O works, and the gate is left in the exact LOW state that read succeeded under.
+  // The first two attempts use the fast clock (when one was requested), the last
+  // two the 20 MHz default, so a card or wiring that cannot do high speed still
+  // mounts. Each attempt re-runs card init, which renegotiates the bus speed.
   esp_err_t mountErr = ESP_FAIL;
   for (int attempt = 0; attempt < 4; attempt++) {
+    host.max_freq_khz = (fastKhz > SDMMC_FREQ_DEFAULT && attempt < 2) ? fastKhz : SDMMC_FREQ_DEFAULT;
     if (sdPwr >= 0) {
       digitalWrite(sdPwr, HIGH);
       delay(80);
@@ -121,7 +132,24 @@ bool SdmmcBlockDevice::begin(const BoardConfig::SdmmcPins& pins) {
     // CSD is valid (capacity known); prove real block I/O before committing.
     e = sdmmc_read_sectors(card, _dmaBuffer, 0, 1);
     mountErr = e;
-    if (e == ESP_OK) break;
+    if (e == ESP_OK) {
+      // Probe a few spread-out multi-sector reads too: a marginal 40 MHz bus often
+      // passes a single sector 0 read but fails on longer bursts (CRC/timeouts).
+      if (host.max_freq_khz > SDMMC_FREQ_DEFAULT) {
+        const uint32_t cap = static_cast<uint32_t>(card->csd.capacity);
+        const uint32_t probes[] = {0, cap / 3, (cap / 3) * 2};
+        for (const uint32_t at : probes) {
+          if (at + kDefaultTransferSectors > cap) continue;
+          e = sdmmc_read_sectors(card, _dmaBuffer, at, kDefaultTransferSectors);
+          if (e != ESP_OK) break;
+        }
+        mountErr = e;
+      }
+      if (e == ESP_OK) break;
+      if (Serial)
+        Serial.printf("[%lu] [SD] SDMMC probe read failed at %d kHz: %s\n", millis(), host.max_freq_khz,
+                      esp_err_to_name(e));
+    }
   }
   if (mountErr != ESP_OK) {
     if (Serial)
@@ -133,6 +161,25 @@ bool SdmmcBlockDevice::begin(const BoardConfig::SdmmcPins& pins) {
     return false;
   }
   _card = card;
+  if (Serial)
+    Serial.printf("[%lu] [SD] SDMMC card running at %d kHz (requested %d kHz)\n", millis(), card->real_freq_khz,
+                  host.max_freq_khz);
+  return true;
+}
+
+bool SdmmcBlockDevice::setMaxTransferSectors(size_t sectors) {
+  if (!_card || sectors == 0) return false;
+  if (sectors == _maxTransferSectors) return true;
+  // Allocate the new buffer before freeing the old one so a failure leaves a
+  // working device. Internal DMA-capable RAM: the SDMMC DMA cannot use PSRAM here.
+  auto* const next = static_cast<uint8_t*>(heap_caps_malloc(kSectorSize * sectors, MALLOC_CAP_DMA | MALLOC_CAP_8BIT));
+  if (!next) {
+    if (Serial) Serial.printf("[%lu] [SD] %u-sector DMA buffer allocation failed\n", millis(), (unsigned)sectors);
+    return false;
+  }
+  heap_caps_free(_dmaBuffer);
+  _dmaBuffer = next;
+  _maxTransferSectors = sectors;
   return true;
 }
 
@@ -155,7 +202,7 @@ void SdmmcBlockDevice::end() {
 bool SdmmcBlockDevice::readSectors(Sector_t sector, uint8_t* dst, size_t ns) {
   if (!_card || !_dmaBuffer || !dst || ns == 0) return false;
   while (ns > 0) {
-    const size_t count = ns > kMaxTransferSectors ? kMaxTransferSectors : ns;
+    const size_t count = ns > _maxTransferSectors ? _maxTransferSectors : ns;
     const size_t bytes = count * kSectorSize;
     if (sdmmc_read_sectors(static_cast<sdmmc_card_t*>(_card), _dmaBuffer, sector, count) != ESP_OK) return false;
     memcpy(dst, _dmaBuffer, bytes);
@@ -169,7 +216,7 @@ bool SdmmcBlockDevice::readSectors(Sector_t sector, uint8_t* dst, size_t ns) {
 bool SdmmcBlockDevice::writeSectors(Sector_t sector, const uint8_t* src, size_t ns) {
   if (!_card || !_dmaBuffer || !src || ns == 0) return false;
   while (ns > 0) {
-    const size_t count = ns > kMaxTransferSectors ? kMaxTransferSectors : ns;
+    const size_t count = ns > _maxTransferSectors ? _maxTransferSectors : ns;
     const size_t bytes = count * kSectorSize;
     memcpy(_dmaBuffer, src, bytes);
     if (sdmmc_write_sectors(static_cast<sdmmc_card_t*>(_card), _dmaBuffer, sector, count) != ESP_OK) return false;

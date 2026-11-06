@@ -29,7 +29,12 @@ namespace freeink {
 
 class UsbMassStorage {
  public:
-  bool begin(FsBlockDeviceInterface* dev);
+  // readAhead/readAheadSectors: optional caller-owned buffer (readAheadSectors * 512
+  // bytes, must outlive the session). TinyUSB hands the read callback at most one
+  // 4 KB chunk (CONFIG_TINYUSB_MSC_BUFSIZE) per call; with a buffer, a sequential
+  // read pulls a whole buffer's worth from the card in one command and the next
+  // chunks are served from memory. Writes stay per-callback (no write-behind).
+  bool begin(FsBlockDeviceInterface* dev, uint8_t* readAhead = nullptr, size_t readAheadSectors = 0);
   void end();
 
   bool active() const { return _active; }

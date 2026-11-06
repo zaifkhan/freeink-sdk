@@ -28,6 +28,13 @@ class SdmmcBlockDevice : public FsBlockDeviceInterface {
   // Bring up the SDMMC host + slot from the board's pin map and initialise the
   // card. Returns false (and leaves the device unusable) on any failure.
   bool begin(const BoardConfig::SdmmcPins& pins);
+  // Cap the data clock for the next begin(); 0 = board default (PaperMono tries
+  // 40 MHz high speed, then 20 MHz; other boards stay at 20 MHz).
+  void setMaxFreqKhz(int khz) { _maxFreqKhz = khz; }
+  // Grow (or shrink back) the internal DMA bounce buffer so one SDMMC command can
+  // move up to `sectors` sectors. Returns false and keeps the current buffer if
+  // the allocation fails. Reset to the default (8) by end()/begin().
+  bool setMaxTransferSectors(size_t sectors);
   void end() override;
 
   bool isBusy() override { return false; }
@@ -40,7 +47,9 @@ class SdmmcBlockDevice : public FsBlockDeviceInterface {
 
  private:
   static constexpr size_t kSectorSize = 512;
-  static constexpr size_t kMaxTransferSectors = 8;
+  static constexpr size_t kDefaultTransferSectors = 8;
+  size_t _maxTransferSectors = kDefaultTransferSectors;
+  int _maxFreqKhz = 0;
 
   // esp-idf's sdmmc_card_t is a typedef of an anonymous struct, so it can't be
   // forward-declared here (a `struct sdmmc_card_t;` tag is a different, conflicting
